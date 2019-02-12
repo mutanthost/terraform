@@ -236,32 +236,40 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 		for _, path := range resp.RequiresReplace {
 			if priorVal.IsNull() {
 				// If prior is null then we don't expect any RequiresReplace at all,
-				// because this is a Create action. (This is just to avoid errors
-				// when we use this value below, if the provider misbehaves.)
+				// because this is a Create action.
 				continue
 			}
-			plannedChangedVal, pathDiags := hcl.ApplyPath(plannedNewVal, path, nil)
-			if pathDiags.HasErrors() {
-				// This always indicates a provider bug, since RequiresReplace
-				// should always refer only to whole attributes (and not into
-				// attribute values themselves) and these should always be
-				// present, even though they might be null or unknown.
-				diags = diags.Append(tfdiags.Sourceless(
-					tfdiags.Error,
-					"Provider produced invalid plan",
-					fmt.Sprintf(
-						"Provider %q has indicated \"requires replacement\" on %s for a non-existent attribute path %#v.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-						n.ProviderAddr.ProviderConfig.Type, absAddr, path,
-					),
-				))
-				continue
-			}
+
 			priorChangedVal, err := path.Apply(priorVal)
 			if err != nil {
 				// Should never happen since prior and changed should be of
 				// the same type, but we'll allow it for robustness.
 				reqRep.Add(path)
 			}
+
+			plannedChangedVal, pathDiags := hcl.ApplyPath(plannedNewVal, path, nil)
+			if pathDiags.HasErrors() {
+				// This usually means that an indexable path step has been
+				// removed in the new value, so the prior path cannot be
+				// applied.
+				plannedChangedVal = cty.NullVal(priorChangedVal.Type())
+
+				// Now check for anything that wasn't an index error, which
+				// should be a bug in the provider.
+				for _, d := range pathDiags {
+					if d.Summary != "Invalid index" {
+						diags = diags.Append(tfdiags.Sourceless(
+							tfdiags.Error,
+							"Provider produced invalid plan",
+							fmt.Sprintf(
+								"Provider %q has indicated \"requires replacement\" on %s for a non-existent attribute path %#v.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
+								n.ProviderAddr.ProviderConfig.Type, absAddr, path,
+							),
+						))
+					}
+				}
+			}
+
 			if priorChangedVal != cty.NilVal {
 				eqV := plannedChangedVal.Equals(priorChangedVal)
 				if !eqV.IsKnown() || eqV.False() {
